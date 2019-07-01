@@ -1,0 +1,10 @@
+---
+title: "Capstone Project Proposal"
+author: "Rahul Sane"
+date: "6/12/2019"
+output: pdf_document
+---
+
+The main goal of this project is to determine if there is a way to accurately predict performance in software development tasks. That is, given the type of task, or given certain keywords in the description of the task, whether we can predict the effort required. 
+
+Immediately, we can see that this analysis will allow for a more optimized workflow amongst software development teams. Given accurate predictions, we can create a system to automatically assign tasks to team members based on current workload, expected effort, type of task, and so on. This analysis may also be used to track performance of developers over time. For example, if certain developers are displaying a pattern of underperforming the predictions, then perhaps this pattern can be caught sooner so that corrective actions may be taken. Vice versa, if other developers are showing a pattern of consistently outperforming the predictions, then they can be recognized as appropriate for their work.

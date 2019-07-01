@@ -1,0 +1,370 @@
+---
+title: "Predicting Software Development Task Times"
+author: "Rahul Sane"
+date: "6/30/2019"
+output: 
+  pdf_document:
+    toc: TRUE
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## 1: The Data
+
+This project relies on a single set of data, courtesy of Derek Jones (https://github.com/Derek-Jones/SiP_dataset). The dataset describes the historical software engineering info for a small company over a 10-year period. The column names are as follows:
+
+```{r echo=FALSE, results='hide', message=FALSE}
+library(tidyverse)
+path1 <- '~/R/capstone/data/SiP_dataset-master/Sip-task-info.csv'
+software_tasks <- read_csv(path1)
+```
+```{r echo=FALSE, message=FALSE}
+str(software_tasks)
+```
+
+Descriptions for the relevant columns are as follows:
+* **TaskNumber:** unique identifier for each task
+* **Summary:** English-language description of each task
+* **Priority:** priority level for each task; 1 is low priority, 10 is high priority
+* **Category:** which of 3 main categories each task falls under
+* **SubCategory:** which of 24 subcategories each task falls under
+* **HoursEstimate:** estimated number of hours required to complete each task (in decimal form)
+* **HoursActual:** actual number of hours required to complete each task (in decimal form)
+* **DeveloperHoursActual:** actual number of hours spent on each task by individual developers (in decimal form)
+
+## 2: Exploratory Analysis
+
+We can use the `ggplot` package to take a look at the spread of task priorities and see that higher priority is assigned with relative rarity. As seen in the figure below, low-priority tasks significantly outnumber high-priority tasks. There seems to be a right tailed distribution:
+
+```{r echo=FALSE}
+ggplot(software_tasks, aes(x = Priority)) + 
+  geom_histogram() +
+  theme_classic() +
+  scale_x_continuous(breaks = round(seq(min(0), max(10), by=1))) +
+  ggtitle('Distribution of Task Priorities')
+```
+
+Next, we look at the unique combinations of Category and SubCategory:
+```{r echo=FALSE}
+unique_cats <- software_tasks %>% group_by(Category, SubCategory) %>% count() %>%
+  arrange(desc(n))
+print(unique_cats)
+```
+
+Taking the four most common SubCategories, we can observe the distribution of priorities within each:
+```{r echo=FALSE}
+library(ggpubr)
+common_tasks <- c('Enhancement', 'Bug', 'In House Support', 'Support')
+for (task in common_tasks) {
+  assign(task, filter(software_tasks, SubCategory == task))
+}
+
+e_plot <- ggplot(Enhancement, aes(x = Priority)) + 
+  geom_histogram(bins = 10) + 
+  theme_classic() +
+  ggtitle('Enhancement Priorities') + 
+  scale_x_continuous(breaks = 1:10, labels = 1:10)
+
+ihs_plot <- ggplot(`In House Support`, aes(x = Priority)) + 
+  geom_histogram(bins = 10) + 
+  theme_classic() +
+  ggtitle('In House Support Priorities') + 
+  scale_x_continuous(breaks = 1:10, labels = 1:10)
+
+b_plot <- ggplot(Bug, aes(x = Priority)) + 
+  geom_histogram(bins = 10) + 
+  theme_classic() + 
+  ggtitle('Bug Priorities') + 
+  scale_x_continuous(breaks = 1:10, labels = 1:10)
+
+s_plot <- ggplot(Support, aes(x = Priority)) + 
+  geom_histogram(bins = 10) + 
+  theme_classic() +
+  ggtitle('Support Priorities') + 
+  scale_x_continuous(breaks = 1:10, labels = 1:10)
+
+ggarrange(e_plot, ihs_plot, b_plot, s_plot, labels=c('A', 'B', 'C', 'D'),
+          ncol=2, nrow=2)
+```
+
+As we see in the above figures, there does not seem to be significant deviation from the overall distribution for the dataset. We do, however, notice a larger portion of mid-priority tasks.
+
+We can now look at summary statistics for each subcategory. Below we can see a weak positive correlation between higher priorities and HoursActual:
+``` {r echo=FALSE, message=FALSE}
+task_hours <- software_tasks %>%
+  group_by(Category, SubCategory) %>%
+  summarize(mean_priority = mean(Priority), mean_hours = mean(HoursActual), 
+            median_hours = median(HoursActual)) %>%
+  arrange(desc(median_hours))
+print(task_hours)
+ggplot(task_hours, aes(x = mean_priority, y = median_hours)) +
+  geom_point() +
+  theme_classic() +
+  ggtitle('Mean Priority vs Median Hours Per SubCategory')
+```
+
+We can take a step back and look at the hours for the whole dataset. It looks like there are a few outliers in the data, where only a few hours were predicted but many more hours were actually needed. It may be prudent to ignore these datapoints, but just to be sure we should examine these points:
+
+``` {r echo=FALSE, message=FALSE}
+ggplot(software_tasks, aes(x = DeveloperHoursActual, y = HoursActual)) + 
+  geom_point() +
+  theme_classic() +
+  ggtitle('DeveloperHoursActual vs HoursActual')
+```
+
+As we can see, most of the points correlate very closely, but there are a few points with significant discrepanies between HoursActual and DeveloperHoursActual/ However, these points all seem to have the same summary, so we will not throw them aaway as they may inform the model. However, as shown in the below plot, there are a few points for which the HoursEstimate and HoursActual deviate significantly. If we take a look at the scatter plot (A) of HoursEstimate and HoursActual, we see that these points can be considered outliers, so we can exclude them from the study. Log-scaling the dataset (B) after removing these outliers shows us the general trend:
+```{r echo=FALSE, message=FALSE}
+normal_plot <- ggplot(software_tasks, aes(x = HoursEstimate, y = HoursActual)) +
+  geom_point() +
+  theme_classic() +
+  ggtitle("HoursEstimate vs HoursActual") +
+  xlab('Estimated') +
+  ylab('Actual')
+
+software_tasks <- software_tasks %>% filter(DeveloperHoursActual < 1500)
+
+log_plot <- ggplot(software_tasks, aes(x = log(HoursEstimate), y = log(HoursActual))) +
+  geom_point() +
+  theme_classic() +
+  ggtitle("Log-Scale HoursEstimate vs HoursActual") +
+  xlab('Log of Estimate') +
+  ylab("Log of Actual")
+
+ggarrange(normal_plot, log_plot, labels=c('A', 'B'), ncol=2)
+```
+
+Now that we know the general trend for the dataset, we can look at the distribution for the four most common task types to see if there is significant difference between them:
+```{r echo=FALSE, message=FALSE}
+e_plot <- ggplot(Enhancement, aes(x = log(HoursEstimate), y = log(HoursActual))) + 
+  geom_point() + 
+  theme_classic() +
+  ggtitle('Enhancement Hours') + 
+  geom_smooth() + 
+  xlab("Log of Estimate") +
+  ylab("Log of Actual")
+
+ihs_plot <- ggplot(`In House Support`, aes(x = log(HoursEstimate), y = log(HoursActual))) + 
+  geom_point() + 
+  theme_classic() +
+  ggtitle('In House Support Hours') + 
+  geom_smooth() + 
+  xlab("Log of Estimate") +
+  ylab("Log of Actual")
+
+b_plot <- ggplot(Bug, aes(x = log(HoursEstimate), y = log(HoursActual))) + 
+  geom_point() + 
+  theme_classic() +
+  ggtitle('Bug Hours') + 
+  geom_smooth() + 
+  xlab("Log of Estimate") +
+  ylab("Log of Actual")
+
+s_plot <- ggplot(Support, aes(x = log(HoursEstimate), y = log(HoursActual))) + 
+  geom_point() + 
+  theme_classic() +
+  ggtitle('Support Hours') + 
+  geom_smooth() + 
+  xlab("Log of Estimate") +
+  ylab("Log of Actual")
+
+ggarrange(e_plot, ihs_plot, b_plot, s_plot, labels=c('A', 'B', 'C', 'D'),
+          ncol=2, nrow=2)
+```
+
+As we can see, the distribution varies significantly between the tast types. We can likely use this to inform the model. 
+
+## 3: Text Analysis/Bag of Words
+
+Tokenizing the Summary column gives us a list of words for each entry in the dataset. However, there are multiple words we can remove from the dataset, including a list of stop words predefined in the `tidytext` package, and a custom list of stop values derived from the dataset itself.
+
+```{r message=FALSE, warning=FALSE}
+library(tidytext)
+tokened_tasks <- software_tasks %>% unnest_tokens(word, Summary)
+
+# Appending custom stop words to built-in tidytext stop_words table:
+custom_stop_words <- tribble(~word, ~lexicon, "ccc", "CUSTOM", "xxxx", "CUSTOM", 
+                             "yyy", "CUSTOM", "zzz", "CUSTOM", "code", "CUSTOM")
+stop_words2 <- custom_stop_words %>% bind_rows(stop_words)
+stop_numbers <- tribble(~word, ~lexicon, 1:2017, 'CUSTOM') %>% unnest() %>% 
+  select('word', 'lexicon')
+stop_numbers$word <- as.character(stop_numbers$word)
+stop_words3 <- stop_numbers %>% bind_rows(stop_words2)
+
+# Removing stop words from tokened_tasks:
+tokened_tasks <- tokened_tasks %>% anti_join(stop_words3)
+
+# Creating word_counts table:
+word_counts <- tokened_tasks %>%
+  group_by(SubCategory)  %>%
+  count(word) %>%
+  top_n(10, n) %>%
+  mutate(word2 = fct_reorder(word, n))
+```
+
+We can use the above created `word_counts` table to see what the most common words are for each subcategory:
+```{r echo=FALSE, message=FALSE}
+print(word_counts)
+```
+
+It looks like words can be a viable predictor for our purposes. Different types of tasks have different words show up more often. For example, "add" shows up a lot in Enhancement task types. Similarly, "scm" and "search" show up with high frequency in Bug task types. Interestingly, "bug" does not seem to show up with high frequency in any task type other than Bug tasks. I thought it might have been a confounding variable, but it seems not. A couple words, such as "meeting" show up with high frequency in many task types, so it may be worth it to remove "meeting" from our list of words. However, this may adversely affect prediction for task types with very low counts to begin with. As such, we will not remove any further words from the set. 
+
+Now we can prepare a data frame with dummy variables for modeling purposes:
+```{r message=FALSE, warning=FALSE}
+library(dummies)
+top_tokens <- word_counts$word2
+top_tokened_tasks <- tokened_tasks %>% filter(word %in% top_tokens)
+top_tokened_tasks$SubCategory <- as.factor(top_tokened_tasks$SubCategory)
+top_tokened_tasks$word <- as.factor(top_tokened_tasks$word)
+dummied_tasks <- cbind(top_tokened_tasks, dummy(top_tokened_tasks$SubCategory, 
+                                                sep = "_"))
+
+new_names <- c('Board_Meeting', 'Bug', 'Bus_Spec', 'Client_Support', 'Consult', 
+               'Conversion', 'Documentation', 'Enhancement', 'General_Docs', 
+               'In_House_Support', 'Mgmt_Meeting', 'Marketing', 'Office_Mgmt', 
+               'Prog_Meeting', 'Proj_Mgmt', 'Release', 'Research', 'Staff_Mgmt', 
+               'Staff_Recruit', 'Support', 'Tech_Spec', 'Testing', 'Third_Party', 
+               'Training')
+names(dummied_tasks)[18:41] <- new_names
+
+dummied_tokened_tasks <- cbind(dummied_tasks, dummy(dummied_tasks$word, sep='_'))
+
+coalesce_by_column <- function(df) {
+  return(dplyr::coalesce(!!! as.list(df)))
+}
+aggregate_dummied_tasks <- dummied_tokened_tasks %>% group_by(TaskNumber) %>%
+  summarize_all(coalesce_by_column)
+```
+
+## 4: Modeling
+
+In order to further prepare the dataset for modeling, we must remove all columns that are not pertinent to our analysis, either because they are not related to the model, or because they are metrics that can only be collected after tasks are complete and can therefore not be used as predictors. For our purposes, we are keeping `Priority`, `HoursEstimate` and all `SubCategory` and `word` dummy variables as predictor variables. `HoursActual` will be our response variable. We will also log-scale `HoursEstimate` and `HoursActual` to `log_estimate` and `log_actual`, respectively. We will also use a 0.75 training data ratio.
+```{r message=FALSE, warning=FALSE}
+# Remove columns that are not useful in our prediction:
+remove_cols <- c('RaisedByID', 'AssignedToID', 'AuthorisedByID', 'StatusCode', 
+                 'ProjectCode', 'ProjectBreakdownCode', 'Category', 'DeveloperID', 
+                 'SubCategory', 'word', 'TaskPerformance', 'DeveloperPerformance', 
+                 'TaskNumber', 'DeveloperHoursActual')
+
+dummied_tasks2 <- aggregate_dummied_tasks %>% select(-remove_cols)
+
+dummied_tasks3 <- dummied_tasks2 %>%
+  mutate(log_estimate = log(HoursEstimate), log_actual = log(HoursActual)) %>%
+  select(-c('HoursEstimate', 'HoursActual'))
+
+# Split into testing and training data sets for the model:
+library(rsample)
+set.seed(24)
+split <- initial_split(dummied_tasks3)
+training_data <- training(split)
+testing_data <- testing(split)
+actuals <- exp(1)^testing_data$log_actual
+estimates <- exp(1)^testing_data$log_estimate
+```
+
+Now we can prepare a base model based on the differences between hours estimated and hours required for each task. Since we will be comparing different types of models, we will use root-mean-squared error (RMSE) as our model performance metric.
+```{r message=FALSE, warning=FALSE}
+# Base model comparing log_estimate to log_actual
+base_error = estimates - actuals
+base_root_mse = sqrt(mean(base_error^2))
+base_srmse <- base_root_mse/sd(actuals)
+base_nrmse <- base_root_mse/(max(actuals) -
+                               min(actuals))
+```
+
+Now we can prepare four models to compare. The models are as follows:
+1. Linear model using `log_estimate` as the only predictor;
+2. LInear model using all predictor variables;
+3. Random forest model using `log_estimate` as the only predictor;
+4. Random forest model using all predictor variables.
+
+The purpose here is to evaluate whether or not a more complex algorithm will out-perform a less complex model. We will use 10-fold cross-validation as this will allow us to use all our training data and tune the model for the most effective parameters. The `caret` package allows for concise code.
+```{r warning=FALSE}
+library(caret)
+
+# Linear predictive model using only log_estimate as input variable:
+model1 <- train(log_actual ~ log_estimate, training_data, method = 'lm',
+                trControl=trainControl(method='cv', number=10),
+                preProcess=c('knnImpute', 'center', 'scale'))
+p1 <- predict(model1, testing_data)
+error1 <- (exp(1)^p1) - actuals
+root_mse1 <- sqrt(mean(error1^2))
+srmse1 <- root_mse1/sd(actuals)
+nrmse1 <- root_mse1/(max(actuals) -
+                       min(actuals))
+
+# Linear predictive model using all input variables:
+model2 <- train(log_actual ~ ., training_data, method = 'lm',
+                trControl=trainControl(method='cv', number=10),
+                preProcess=c('knnImpute', 'center', 'scale'))
+p2 <- predict(model2, testing_data)
+error2 <- (exp(1)^p2) - actuals
+root_mse2 <- sqrt(mean(error2^2))
+srmse2 <- root_mse2/sd(actuals)
+nrmse2 <- root_mse2/(max(actuals) -
+                       min(actuals))
+
+# Random forest model using only log_estimate as a predictor:
+model3 <- train(log_actual ~ log_estimate, training_data, method='rf', 
+                trControl=trainControl(method='cv', number=10), 
+                preProcess=c('knnImpute', 'center', 'scale'))
+p3 <- predict(model3, testing_data)
+error3 <- (exp(1)^p3) - actuals
+root_mse3 <- sqrt(mean(error3^2))
+srmse3 <- root_mse3/sd(actuals)
+nrmse3 <- root_mse3/(max(actuals) -
+                       min(actuals))
+
+# Random forest model using all input variables:
+model4 <- train(log_actual ~ ., training_data, method='rf', 
+                trControl=trainControl(method='cv', number=10), 
+                preProcess=c('knnImpute', 'center', 'scale'))
+p4 <- predict(model4, testing_data)
+error4 <- (exp(1)^p4) - actuals
+root_mse4 <- sqrt(mean(error4^2))
+srmse4 <- root_mse4/sd(actuals)
+nrmse4 <- root_mse4/(max(actuals) -
+                       min(actuals))
+```
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+model_summaries <- tribble(~Model, ~RMSE, ~SRMSE, ~NRMSE,
+                           'Model 1', root_mse1, srmse1, nrmse1,
+                           'Model 2', root_mse2, srmse2, nrmse2,
+                           'Model 3', root_mse3, srmse3, nrmse3,
+                           'Model 4', root_mse4, srmse4, nrmse4)
+
+models_vs_base <- tribble(~Model, ~RMSE,
+                          "Base", base_root_mse,
+                          "Model 1", root_mse1,
+                          "Model 2", root_mse2,
+                          "Model 3", root_mse3,
+                          "Model 4", root_mse4)
+```
+
+As the hours data is now in log-scaled form, we must convert the data back to normal scale using $e^x$, where $e$ is Euler's constant (as the log-scaling in R is based on the natural logarithm), and $x$ is the data point to scale. From there, we calculate error ($\epsilon$) using 
+$$\epsilon = y_{predicted} - y_{actual},$$
+where $y^p$ is the predicted response and $y^a$ is the actual response. We can then calculate root-mean-squared error with 
+$$RMSE = \sqrt{mean(error^2)},$$
+where $error$ is the vector of errors for a particular model. However, since the range of hours is quite large, we can normalize the $RMSE$ values over the range of the data, and over the standard deviation ($\sigma$) of the data, like so:
+$$NRMSE = \frac{RMSE}{range},$$
+$$SRMSE = \frac{RMSE}{\sigma}.$$
+Both of these values are expressed as percentages. The table below summarizes the results of the models:
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+print(models_vs_base)
+```
+``` {r echo=FALSE, message=FALSE, warning=FALSE}
+print(model_summaries)
+```
+
+As we can see, all of the models handily outperformed the base model. Additionally, none of the models had an RMSE that exceeded the standard deviation of the testing data. From here, we have a few interesting observations. When using only `log_estimate` as a predictor, the simpler linear regression (Model 1) outperformed the more complex random forest model (Model 3); when all predictor variables were used, random forest (Model 4) outperformed linear regression (Model 2). However, it it worth noting that Model 4 was significantly more computationally expensive than Model 2. In the case of the data here, Model 2 took less than 30 seconds to run, whereas Model 4 took just over 3 hours. 
+
+## 5: Conclusions
+
+In this analysis, we looked at a historical dataset of software engineering task performance. We attempted to predict the hours required for each task based on the estimated time required, the subcategory of each task, and the summary of each task. We tokeneized the summaries and created dummy variables for the resulting words and for the task subcategories. We then compared four different models to gauge the effectiveness of prediction and to see whether costly, complex models can outperform less costly, simpler models to such a degree as to justify their expense. 
+
+From our results we can see that more analysis is required to improve the accuracy of the predictions. One such analysis can be topic modeling based on the distribution of words across the data. Assigning each word to a topic may help refine the prediction by further segmenting the data into appropriate bins. It may also be beneficial to cluster the data based on data that we removed from the dataset, such as developer IDs and project codes, and segment the data based on these clusters. A third option would be to simply try different models and compare the performance of those with the ones we have run here; for example, support vector machines or polynomial regressions.
+
+As it stands, the analysis proves that prediction is possible. The use case for such analysis is also immediately identifiable. Companies that rely heavily on internal softwares can stand to benefit from increased accuracy in prediction of task performance. This may allow for improved workflows and better project management. The nearly 8-hour decrease in RMSE between the base model and Model 1 shows us the utility of such prediction. However, the increase in accuracy between Model 2 and Model 4 (approximately 0.338 hours) may not be worth the added cost of the more complex model.
+
+If we were to push the accuracy of the models here, we may be able to create a viable service, in which we take historical data of clients and create custom algorithms using our analysis here as a template. THe operational benefits would be enormous, as detailed in the previous paragraph. It should be noted, however, that the success of such a service depends on the quality of the data we recieve. In our case, we were lucky to find a somewhat clean dataset to work with. It would be interesting nonetheless to see what other benefits such a service would provide.
